@@ -17,11 +17,16 @@ What is matched, and where the numbers come from:
   frames therefore keep the ball with probability VIS_DEAD, live frames with VIS_LIVE, chosen so
   the overall rate stays near 59% at a typical ~30% dead share.
 
+* Position noise is smooth drift, not per-frame shake (VERSION >= 3). The BAR-ATH player track
+  is very smooth (median second difference ~1 mm/frame, same as Metrica's corrected data), so
+  white jitter would invent velocity noise the real data does not have. Noise is white noise
+  averaged over ~1 s and rescaled to the requested standard deviation.
+
 Deterministic for a given seed.
 """
 import numpy as np
 
-VERSION = 2
+VERSION = 3
 VIS_DEAD = 0.35
 VIS_LIVE = 0.69
 
@@ -63,6 +68,19 @@ def _burst_mask(rng, F, ball_runs, visible_share):
     return keep
 
 
+def _smooth_noise(rng, shape, std, width=25):
+    """Gaussian noise low-passed along axis 0 (moving average over `width` frames), with the
+    requested per-sample standard deviation."""
+    if std <= 0:
+        return np.zeros(shape)
+    white = rng.normal(0, 1, shape)
+    k = np.ones(width) / width
+    flat = white.reshape(shape[0], -1)
+    sm = np.stack([np.convolve(flat[:, j], k, mode="same") for j in range(flat.shape[1])], 1)
+    sm *= std / max(sm.std(), 1e-12)
+    return sm.reshape(shape)
+
+
 def degrade(d, ball_runs, seed, player_missing=0.07, player_gap_mean=200,
             ball_jitter=0.1, player_jitter=0.05, pitch=(105.0, 68.0), dead=None):
     """Return a degraded copy of game dict d (normalised coordinates).
@@ -84,7 +102,9 @@ def degrade(d, ball_runs, seed, player_missing=0.07, player_gap_mean=200,
         keep_live = _burst_mask(rng, F, ball_runs, VIS_LIVE)
         keep_dead = _burst_mask(rng, F, ball_runs, VIS_DEAD)
         keep = np.where(dead, keep_dead, keep_live)
-    ball = ball + rng.normal(0, ball_jitter, ball.shape) / np.array([L, W])
+    noise = (_smooth_noise(rng, ball.shape, ball_jitter) if VERSION >= 3
+             else rng.normal(0, ball_jitter, ball.shape))
+    ball = ball + noise / np.array([L, W])
     ball[~keep] = np.nan
     out["ball"] = ball.astype(np.float32)
 
@@ -97,6 +117,8 @@ def degrade(d, ball_runs, seed, player_missing=0.07, player_gap_mean=200,
         lens = rng.geometric(1.0 / player_gap_mean, len(starts))
         for a, n in zip(starts, lens):
             P[a:a + n, s] = np.nan
-    P = P + rng.normal(0, player_jitter, P.shape) / np.array([L, W])
+    noise = (_smooth_noise(rng, P.shape, player_jitter) if VERSION >= 3
+             else rng.normal(0, player_jitter, P.shape))
+    P = P + noise / np.array([L, W])
     out["players"] = P.astype(np.float32)
     return out
