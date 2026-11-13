@@ -53,22 +53,48 @@ def predict(clf, X0, X1):
 
 
 def viterbi(probs, switch, to_dead, from_dead, eps=1e-6):
-    """Most likely H/A/D path given per-frame probabilities and transition penalties (in nats)."""
-    logp = np.log(np.clip(probs, eps, 1.0))
-    T = np.array([[0.0, switch, to_dead],
-                  [switch, 0.0, to_dead],
-                  [from_dead, from_dead, 0.0]])
-    n = len(probs)
-    back = np.empty((n, 3), np.int8)
-    score = logp[0].copy()
+    """Most likely H/A/D path given per-frame probabilities and transition penalties (in nats).
+
+    Plain-float inner loop: with three states this is ~20x faster than per-frame numpy calls.
+    """
+    logp = np.log(np.clip(probs, eps, 1.0)).tolist()
+    n = len(logp)
+    back = bytearray(3 * n)
+    h, a, d = logp[0]
     for t in range(1, n):
-        cand = score[:, None] - T              # from i (rows) to j (cols)
-        back[t] = np.argmax(cand, axis=0)
-        score = cand[back[t], np.arange(3)] + logp[t]
+        lh, la, ld = logp[t]
+        # into H
+        c0, c1, c2 = h, a - switch, d - from_dead
+        if c0 >= c1 and c0 >= c2:
+            nh, bh = c0, 0
+        elif c1 >= c2:
+            nh, bh = c1, 1
+        else:
+            nh, bh = c2, 2
+        # into A
+        c0, c1, c2 = h - switch, a, d - from_dead
+        if c1 >= c0 and c1 >= c2:
+            na, ba = c1, 1
+        elif c0 >= c2:
+            na, ba = c0, 0
+        else:
+            na, ba = c2, 2
+        # into D
+        c0, c1, c2 = h - to_dead, a - to_dead, d
+        if c2 >= c0 and c2 >= c1:
+            nd, bd = c2, 2
+        elif c0 >= c1:
+            nd, bd = c0, 0
+        else:
+            nd, bd = c1, 1
+        back[3 * t], back[3 * t + 1], back[3 * t + 2] = bh, ba, bd
+        h, a, d = nh + lh, na + la, nd + ld
     path = np.empty(n, np.int8)
-    path[-1] = int(np.argmax(score))
+    s = 0 if (h >= a and h >= d) else (1 if a >= d else 2)
+    path[-1] = s
     for t in range(n - 1, 0, -1):
-        path[t - 1] = back[t, path[t]]
+        s = back[3 * t + s]
+        path[t - 1] = s
     return path
 
 

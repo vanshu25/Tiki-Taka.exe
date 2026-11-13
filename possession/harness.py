@@ -40,12 +40,14 @@ def bar_ath_ball_runs():
 
 
 def game_features(n, seed, ball_runs, use_cache=True):
-    path = os.path.join(CACHE, "ext_g{}_s{}.npz".format(n, seed))
+    path = os.path.join(CACHE, "ext_g{}_s{}_f{}_d{}.npz".format(n, seed, features.VERSION,
+                                                             degrade.VERSION))
     if use_cache and os.path.exists(path):
         z = np.load(path, allow_pickle=False)
         return z["X0"], z["X1"], z["labels"], list(z["names"])
     g = external.load_game(n)
-    dg = degrade.degrade(g, ball_runs, seed=1000 * n + seed, pitch=external.PITCH)
+    dead = (g["labels"] == model.D) if degrade.VERSION >= 2 else None
+    dg = degrade.degrade(g, ball_runs, seed=1000 * n + seed, pitch=external.PITCH, dead=dead)
     prep = features.prepare(dg, external.PITCH)
     X0, names = features.build(prep, 0)
     X1, _ = features.build(prep, 1)
@@ -68,9 +70,12 @@ def logo_probs(ball_runs, seeds=SEEDS):
 
 
 def score(labels, pred):
-    r = pm.evaluate(labels, pred)
-    return {"spell": r["spell_f1_mean"], "macro": r["macro_f1"],
-            "n_pred": r["n_pred_spells"], "n_gt": r["n_gt_spells"]}
+    """The two headline numbers, via the official scorer's own functions."""
+    runs = pm.valid_runs(labels)
+    filled = pm.fill_abstentions(pred, runs)
+    sp = pm.spell_scores(labels, filled, runs)
+    macro = pm.macro_f1(pm.scored_confusion(pm.confusion(labels, pred)))
+    return {"spell": sp["mean_f1"], "macro": macro, "n_pred": sp["n_pred"], "n_gt": sp["n_gt"]}
 
 
 def grid(probs_by_game, switches, to_deads, from_deads):

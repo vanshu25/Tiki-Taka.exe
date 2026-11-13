@@ -11,6 +11,9 @@ FPS = 25
 MAX_PLAYER_SPEED = 12.0   # m/s; faster than any sprint -> a tracking jump, not motion
 MAX_BALL_SPEED = 40.0     # m/s; faster than a struck ball -> a tracking jump
 WINDOWS = (25, 75, 250)   # rolling context: 1 s, 3 s, 10 s (centred)
+VERSION = 1               # bump whenever a feature changes (invalidates the harness cache)
+# VERSION 2 adds explicit stoppage features (below). Measured on the external harness it made no
+# difference (spellF1 0.590 vs 0.594 for v1, degradation v2), so v1 is the one in use.
 
 
 def _nanmean(a, axis):
@@ -136,6 +139,42 @@ def build(g, own):
     cols["since_ball"] = np.minimum(frames_since(ball_ok), 3000)
     cols["until_ball"] = np.minimum(frames_until(ball_ok), 3000)
     cols["n_players"] = np.isfinite(P[:, :, 0]).sum(1).astype(float)
+
+    # Explicit stoppage / restart evidence (feature VERSION >= 2). All geometric, no constants
+    # taken from BAR-ATH: pitch markings are the Laws of the Game, speeds are plain physics.
+    if VERSION >= 2:
+        still = np.where(ball_ok, (ball_speed < 1.0).astype(float), np.nan)
+        cols["ball_still_r25"] = rolling_mean(still, 25)
+        cols["ball_still_r75"] = rolling_mean(still, 75)
+        is_out = cols["ball_out"] > 0.5
+        cols["since_out"] = np.minimum(frames_since(is_out), 3000)
+        cols["until_out"] = np.minimum(frames_until(is_out), 3000)
+        bx, by = B[:, 0], B[:, 1]
+        dx_goal = np.minimum(bx, L - bx)
+        cols["ball_corner_d"] = np.sqrt(dx_goal ** 2 + np.minimum(by, W - by) ** 2)
+        cols["ball_six_yard"] = ((dx_goal < 5.5) & (np.abs(by - W / 2) < 9.16)).astype(float)
+        cols["ball_six_yard"][~ball_ok] = np.nan
+        cols["ball_centre_d"] = np.sqrt((bx - L / 2) ** 2 + (by - W / 2) ** 2)
+        # Throw-in shape: the nearest player to the ball is standing on/over the touchline.
+        j = np.argmin(np.where(np.isfinite(dist), dist, np.inf), 1)
+        near_y = P[np.arange(F), j, 1]
+        cols["holder_touch_d"] = np.where(ball_ok, np.minimum(near_y, W - near_y), np.nan)
+        cols["holder_d"] = _masked_min(dist, 1)
+        # Kick-off shape: both teams entirely in their own half.
+        own_half = []
+        for t in (0, 1):
+            xa = ax(P[:, teams == t, 0], t)
+            own_half.append(_nanmean(np.where(np.isfinite(xa), (xa < L / 2).astype(float),
+                                              np.nan), 1))
+        cols["kickoff_shape"] = np.minimum(own_half[0], own_half[1])
+        cols["kickoff_shape_r25"] = rolling_mean(cols["kickoff_shape"], 25)
+        # Fastest player slowing down: in open play someone is nearly always running.
+        top = np.sort(np.where(np.isfinite(speed), speed, -1.0), 1)[:, -3:]
+        top = np.where(top < 0, np.nan, top)
+        cols["top3_speed"] = _nanmean(top, 1)
+        for w in (25, 75, 250):
+            cols["top3_speed_r{}".format(w)] = rolling_mean(cols["top3_speed"], w)
+        cols["n_within10"] = np.where(ball_ok, (dist < 10).sum(1), np.nan).astype(float)
 
     for tag, t in (("own", own), ("opp", opp)):
         m = teams == t
