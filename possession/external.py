@@ -132,6 +132,9 @@ def _events_json3():
     return pd.DataFrame(rows)
 
 
+LABEL_VERSION = 2          # 2 = require controlled possession for an open-play switch
+CONTROL_MIN_FRAMES = 50    # "keeps the ball for a few seconds": 2 s, the low end
+
 # Events that mean "this team has the ball at the event's start frame".
 POSSESSION_TYPES = {"PASS", "CARRY", "SHOT", "RECOVERY", "SET PIECE", "BALL LOST", "BALL OUT"}
 # Events that are touches of a live ball (anything a stoppage can follow).
@@ -176,7 +179,47 @@ def events_to_labels(ev, n_frames, period):
                 last_play_end = e + 1 if row.type != "SET PIECE" else row.start + 1
         labels[:first][period[:first] == per] = X
     labels[period == 0] = X
+    if LABEL_VERSION >= 2:
+        labels = require_control(labels, ev)
     return labels
+
+
+def require_control(labels, ev, min_hold=CONTROL_MIN_FRAMES):
+    """Apply the challenge's definition of a change of possession to event-derived labels.
+
+    CHALLENGE.md: possession changes only when the other team gains *controlled* possession; a
+    touch without control, a deflection or a won duel without control does not count, and a
+    loose ball stays with the last team. Its suggested proxies are a player keeping the ball
+    for a few seconds, or completed passes. So an open-play H<->A switch is kept only if the new
+    team, inside its spell, completes a pass (next event is its own), shoots, or keeps
+    the ball for `min_hold` frames; otherwise the spell goes back to the previous team.
+    Possessions that start at a restart (after D) are always kept: a restart has a clear owner.
+    """
+    out = labels.copy()
+    ev = ev.sort_values(["start", "end"], kind="stable").reset_index(drop=True)
+    starts = ev["start"].values
+    teams = ev["team"].values
+    types = ev["type"].values
+    nxt_team = np.r_[teams[1:], -1]
+    # CARRY is deliberately not proof of control: only game 3's event format has it, and the
+    # 2 s hold already covers a real dribble -- this keeps the rule identical across games.
+    shows_control = ((types == "PASS") & (nxt_team == teams)) | (types == "SHOT")
+    n = len(out)
+    t = 1
+    while t < n:
+        prev, cur = out[t - 1], out[t]
+        if prev in (H, A) and cur in (H, A) and prev != cur:
+            e = t
+            while e < n and out[e] == cur:
+                e += 1
+            sel = (starts >= t) & (starts < e) & (teams == cur)
+            if not (e - t >= min_hold or shows_control[sel].any()):
+                out[t:e] = prev
+                continue  # re-examine from t: the merged spell may now meet another switch
+            t = e
+        else:
+            t += 1
+    return out
 
 
 def load_game(n):

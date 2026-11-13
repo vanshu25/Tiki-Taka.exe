@@ -40,13 +40,14 @@ def bar_ath_ball_runs():
 
 
 def game_features(n, seed, ball_runs, use_cache=True):
-    path = os.path.join(CACHE, "ext_g{}_s{}_f{}_d{}.npz".format(n, seed, features.VERSION,
-                                                             degrade.VERSION))
+    path = os.path.join(CACHE, "ext_g{}_s{}_f{}_d{}{}.npz".format(
+        n, seed, features.VERSION, degrade.VERSION,
+        "" if external.LABEL_VERSION == 1 else "_l{}".format(external.LABEL_VERSION)))
     if use_cache and os.path.exists(path):
         z = np.load(path, allow_pickle=False)
         return z["X0"], z["X1"], z["labels"], list(z["names"])
     g = external.load_game(n)
-    dead = (g["labels"] == model.D) if degrade.VERSION >= 2 else None
+    dead = (g["labels"] == model.D) if degrade.VERSION >= 2 else None  # D is label-version-free
     dg = degrade.degrade(g, ball_runs, seed=1000 * n + seed, pitch=external.PITCH, dead=dead)
     prep = features.prepare(dg, external.PITCH)
     X0, names = features.build(prep, 0)

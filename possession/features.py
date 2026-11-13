@@ -13,7 +13,9 @@ MAX_BALL_SPEED = 40.0     # m/s; faster than a struck ball -> a tracking jump
 WINDOWS = (25, 75, 250)   # rolling context: 1 s, 3 s, 10 s (centred)
 VERSION = 1               # bump whenever a feature changes (invalidates the harness cache)
 # VERSION 2 adds explicit stoppage features (below). Measured on the external harness it made no
-# difference (spellF1 0.590 vs 0.594 for v1, degradation v2), so v1 is the one in use.
+# difference (spellF1 0.590 vs 0.594 for v1, degradation v2), so it is skipped.
+# VERSION 3 = v1 + touch / sub-second features for short possessions (fine_touch_features).
+# Measured +0.006 (0.686 vs 0.680, controlled labels) -- inside noise, so v1 stays in use.
 
 
 def _nanmean(a, axis):
@@ -142,7 +144,7 @@ def build(g, own):
 
     # Explicit stoppage / restart evidence (feature VERSION >= 2). All geometric, no constants
     # taken from BAR-ATH: pitch markings are the Laws of the Game, speeds are plain physics.
-    if VERSION >= 2:
+    if VERSION == 2:
         still = np.where(ball_ok, (ball_speed < 1.0).astype(float), np.nan)
         cols["ball_still_r25"] = rolling_mean(still, 25)
         cols["ball_still_r75"] = rolling_mean(still, 75)
@@ -228,6 +230,70 @@ def build(g, own):
     cols["speed_all_trend"] = rolling_mean(cols["speed_all"], 25)
     cols["speed_all_trend"] = np.r_[np.full(50, np.nan),
                                     cols["speed_all_trend"][50:] - cols["speed_all_trend"][:-50]]
+    # Fine-grained control evidence for short possessions (feature VERSION >= 3).
+    if VERSION >= 3:
+        fine_touch_features(cols, P, B, BV, dist, teams, own, ball_ok)
     names = list(cols)
     X = np.column_stack([np.asarray(cols[n], dtype=np.float32) for n in names])
     return X, names
+
+
+TOUCH_DV = 3.0      # m/s change in ball velocity over ~0.25 s: a kick, trap or deflection
+TOUCH_R = 2.5       # m: the touching player must be this close (a stride plus a leg)
+
+
+def _shift(x, k):
+    """x shifted so out[t] = x[t + k] (NaN-padded)."""
+    out = np.full_like(x, np.nan, dtype=np.float64)
+    if k > 0:
+        out[:-k] = x[k:]
+    elif k < 0:
+        out[-k:] = x[:k]
+    else:
+        out[:] = x
+    return out
+
+
+def fine_touch_features(cols, P, B, BV, dist, teams, own, ball_ok):
+    """Touch events and sub-second nearest-team context.
+
+    A touch is a sudden change of ball velocity with a player within TOUCH_R; it is credited
+    to that player's team. Both thresholds are physical priors, not fitted to any game.
+    """
+    F = len(B)
+    dv = np.sqrt(((_shift(BV[:, 0], 3) - _shift(BV[:, 0], -3)) ** 2
+                  + (_shift(BV[:, 1], 3) - _shift(BV[:, 1], -3)) ** 2))
+    dmin_t = {}
+    for t in (0, 1):
+        dmin_t[t] = _masked_min(dist[:, teams == t], 1)
+    touch = {}
+    for t in (0, 1):
+        o = 1 - t
+        touch[t] = (dv > TOUCH_DV) & (dmin_t[t] < TOUCH_R) & ~(dmin_t[o] < dmin_t[t])
+    # Collapse each burst of touch frames to its first frame.
+    for t in (0, 1):
+        x = touch[t]
+        touch[t] = x & ~np.r_[False, x[:-1]]
+    for tag, t in (("own", own), ("opp", 1 - own)):
+        cols[tag + "_since_touch"] = np.minimum(frames_since(touch[t]), 2000)
+        cols[tag + "_until_touch"] = np.minimum(frames_until(touch[t]), 2000)
+        cols[tag + "_touches_r50"] = rolling_mean(touch[t].astype(float), 50) * 101
+    # Team of the last touch and of the next touch (+1 own, -1 opp, 0 none yet).
+    last = np.zeros(F)
+    nxt = np.zeros(F)
+    any_touch = touch[own] | touch[1 - own]
+    val = np.where(touch[own], 1.0, np.where(touch[1 - own], -1.0, 0.0))
+    idx = np.maximum.accumulate(np.where(any_touch, np.arange(F), -1))
+    last[idx >= 0] = val[idx[idx >= 0]]
+    ridx = np.where(any_touch, np.arange(F), F)
+    ridx = np.minimum.accumulate(ridx[::-1])[::-1]
+    nxt[ridx < F] = val[ridx[ridx < F]]
+    cols["last_touch_team"] = last
+    cols["next_touch_team"] = nxt
+    cols["ball_dv"] = dv
+    # Sub-second nearest-team context.
+    near = np.where(ball_ok, np.sign(cols["dmin_diff"]), np.nan)
+    for w in (5, 12):
+        cols["near_r{}".format(w)] = rolling_mean(near, w)
+    for k in (-25, -12, -5, 5, 12, 25):
+        cols["dmin_diff_s{:+d}".format(k)] = _shift(cols["dmin_diff"], k)
