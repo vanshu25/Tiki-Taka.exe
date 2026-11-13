@@ -1,0 +1,6 @@
+{
+  "switch": 7.0,
+  "to_dead": 20.0,
+  "from_dead": 10.0,
+  "_source": "Chosen 2026-11-12 on the external harness only (leave-one-game-out, Metrica sample games 1-3, degraded, seeds 0-1). Grid switch {3,5,7,10} x to_dead {5,10,20} x from_dead {3,6,10}: all within 0.555-0.567 mean spellF1; this point has the best mean (0.5673) and best worst-game (0.5280). No BAR-ATH labels used."
+}
