@@ -132,8 +132,10 @@ def _events_json3():
     return pd.DataFrame(rows)
 
 
-LABEL_VERSION = 2          # 2 = require controlled possession for an open-play switch
+LABEL_VERSION = 3          # 2 = require controlled possession for an open-play switch
+                           # 3 = dead ball read from the corrected tracking, not from events
 CONTROL_MIN_FRAMES = 50    # "keeps the ball for a few seconds": 2 s, the low end
+DEAD_MIN_FRAMES = 25       # the corrected ball is absent this long -> out of play, not a blip
 
 # Events that mean "this team has the ball at the event's start frame".
 POSSESSION_TYPES = {"PASS", "CARRY", "SHOT", "RECOVERY", "SET PIECE", "BALL LOST", "BALL OUT"}
@@ -145,7 +147,29 @@ def _is_restart(row):
     return row.type == "SET PIECE" or (row.type == "PASS" and "GOAL KICK" in row.subtype)
 
 
-def events_to_labels(ev, n_frames, period):
+def dead_from_tracking(ball, period, min_len=DEAD_MIN_FRAMES):
+    """Dead-ball frames as the corrected tracking marks them: the ball has no position.
+
+    The challenge defines D as "where the corrected tracking marks the ball dead". Metrica's
+    corrected sample tracking removes the ball while it is out of play: it is absent in the 2 s
+    before 93-100% of free kicks, throw-ins, corners and kick-offs. Gaps shorter than `min_len`
+    frames are tracking blips in live play, not stoppages.
+
+    Version 2 derived D from events instead (last live event -> next SET PIECE). That missed
+    every goal-kick stoppage in games 1-2, where the keeper's RECOVERY shares the goal kick's
+    frame (about 22 stoppages and 9% of the frames of game 1 were labelled as live possession),
+    and it called the keeper holding the ball "dead".
+    """
+    gone = ~np.isfinite(ball[:, 0]) & (period > 0)
+    e = np.diff(np.r_[0, gone.astype(np.int8), 0])
+    dead = np.zeros(len(gone), bool)
+    for a, b in zip(np.flatnonzero(e == 1), np.flatnonzero(e == -1)):
+        if b - a >= min_len:
+            dead[a:b] = True
+    return dead
+
+
+def events_to_labels(ev, n_frames, period, ball=None):
     """Stand-in H/A/D/X labels from event data, mechanically:
 
     * live ball: the team of the most recent possession event (pass, carry, shot, recovery,
@@ -171,7 +195,7 @@ def events_to_labels(ev, n_frames, period):
             labels[pos:last + 1] = cur
         # Dead-ball spans before every restart (the opening kick-off is the period start).
         last_play_end = None
-        for row in pe.itertuples():
+        for row in (pe.itertuples() if LABEL_VERSION < 3 or ball is None else ()):
             if _is_restart(row) and last_play_end is not None and last_play_end < row.start:
                 labels[last_play_end:row.start] = D
             if row.type in PLAY_TYPES:
@@ -179,6 +203,8 @@ def events_to_labels(ev, n_frames, period):
                 last_play_end = e + 1 if row.type != "SET PIECE" else row.start + 1
         labels[:first][period[:first] == per] = X
     labels[period == 0] = X
+    if LABEL_VERSION >= 3 and ball is not None:
+        labels[dead_from_tracking(ball, period) & (labels != X)] = D
     if LABEL_VERSION >= 2:
         labels = require_control(labels, ev)
     return labels
@@ -227,7 +253,7 @@ def load_game(n):
     d = _load_csv_game(n) if n in (1, 2) else _load_epts_game3()
     ev = _events_csv(n) if n in (1, 2) else _events_json3()
     F = d["ball"].shape[0]
-    d["labels"] = events_to_labels(ev, F, d["period"])
+    d["labels"] = events_to_labels(ev, F, d["period"], d["ball"])
     d["events"] = ev
     d["pitch"] = PITCH
     return d
